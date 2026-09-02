@@ -1,11 +1,14 @@
-# DisableCallIdle for Kettu
+# DisableCallIdle Kettu Diagnostic
 
-Kettu/Vendetta-format external plugin.
+Target: Discord Android 343.12 / Kettu 1.4.3.
 
-Files required for installation:
-- manifest.json
-- index.js
+This is intentionally a **diagnostic-only** plugin. It does not disable Discord's
+call-idle timeout. It exists to identify which known call-idle signatures are present
+in the loaded Discord bundle before making the final patch.
 
-Install from the directory URL containing those two files.
+Source files:
+- `manifest.json`
+- `index.tsx`
 
-This plugin targets Discord's call-idle logic using the same patch signatures as the known DisableCallIdle implementation, plus a compatibility fallback for the older mobile marker-based implementation.
+The source should be built with the Kettu/Revenge plugin build system; the resulting
+plugin artifact contains `manifest.json` and `index.js`.

@@ -1,14 +1,7 @@
 {
-  "name": "DisableCallIdle",
-  "description": "Prevents Discord from disconnecting an idle 1-to-1 DM voice call after the call-idle timeout.",
-  "authors": [
-    {
-      "name": "Origin9115"
-    }
-  ],
-  "main": "index.js",
-  "hash": "7799207a43c43834",
-  "vendetta": {
-    "icon": "CallIcon"
-  }
+  "name": "DisableCallIdle Diagnostic",
+  "description": "Diagnostic plugin for identifying Discord's call-idle implementation on Android 343.12. It does not disable the timeout.",
+  "author": "Origin9115",
+  "version": "1.0.0",
+  "license": "MIT"
 }
