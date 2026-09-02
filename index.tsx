@@ -1,7 +1,9 @@
-({
+import definePlugin from "@utils/types";
+
+export default definePlugin({
   name: "DisableCallIdle",
   description: "Prevents Discord from automatically disconnecting an idle 1-to-1 DM voice call after 3 minutes.",
-  authors: [{ name: "OpenAI" }],
+  authors: [{ name: "OpenAI", id: 0n }],
   patches: [
     {
       find: ".Messages.BOT_CALL_IDLE_DISCONNECT",
@@ -18,4 +20,4 @@
       }
     }
   ]
-})
+});
