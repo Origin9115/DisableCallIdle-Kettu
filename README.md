@@ -1,14 +1,10 @@
-# DisableCallIdle Kettu Diagnostic
+# DisableCallIdle — Discord Android 343.12 / Kettu
 
-Target: Discord Android 343.12 / Kettu 1.4.3.
+This plugin targets the Android `CallIdleManager` implementation used by Discord 343.12.
 
-This is intentionally a **diagnostic-only** plugin. It does not disable Discord's
-call-idle timeout. It exists to identify which known call-idle signatures are present
-in the loaded Discord bundle before making the final patch.
+The verified Hermes bytecode contains a module-level constant of exactly `180000` ms.
+The `handleEmbeddedActivityDisconnect` and `handleVoiceStateUpdates` handlers pass the
+captured value to `idleTimeout.start(...)` together with the `disconnect` callback.
 
-Source files:
-- `manifest.json`
-- `index.tsx`
-
-The source should be built with the Kettu/Revenge plugin build system; the resulting
-plugin artifact contains `manifest.json` and `index.js`.
+The patch replaces `idleTimeout.start` with `idleTimeout.stop`, preventing the 3-minute
+idle timer from being scheduled while preserving the rest of the call-state logic.

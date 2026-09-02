@@ -1,7 +1,8 @@
 {
-  "name": "DisableCallIdle Diagnostic",
-  "description": "Diagnostic plugin for identifying Discord's call-idle implementation on Android 343.12. It does not disable the timeout.",
-  "author": "Origin9115",
-  "version": "1.0.0",
-  "license": "MIT"
+  "name": "DisableCallIdle",
+  "description": "Disables Discord Android's 3-minute idle disconnect for 1-to-1 DM voice calls.",
+  "author": "OpenAI",
+  "version": "2.0.0",
+  "license": "MIT",
+  "main": "index.js"
 }
