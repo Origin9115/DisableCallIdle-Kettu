@@ -1,13 +1,10 @@
 {
   "name": "DisableCallIdle",
-  "description": "Stops Discord's one-to-one voice-call idle disconnect timer.",
+  "description": "Disables Discord's 3-minute idle disconnect for private DM voice calls.",
   "authors": [
-    {
-      "name": "Omar"
-    }
+    { "name": "Omar" }
   ],
   "main": "index.js",
-  "hash": "669b4936ae44cde2b51af4ae632734a3062c324eb7d25932f0f4aa4c5b39c574",
   "vendetta": {
     "icon": "CallIcon"
   }

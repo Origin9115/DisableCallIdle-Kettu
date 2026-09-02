@@ -1,13 +1,25 @@
-# DisableCallIdle for Kettu
+# DisableCallIdle — Kettu / Android
 
-Target: Discord Android 343.12 / Kettu 1.4.3
+Build target: Discord 343.12 + Kettu 1.4.3.
 
-This is a Kettu/Vendetta-style plugin. It only patches a timeout `start()` method when the function source contains `BOT_CALL_IDLE_DISCONNECT`, then calls `stop()` on that timeout instance.
+This version does not depend on a fixed Discord Metro module ID. It scans loaded Metro
+exports for the Discord call-idle implementation and patches methods whose source
+contains `idleTimeout.start/stop`, `handleIdleUpdate`, or `BOT_CALL_IDLE_DISCONNECT`.
 
-SHA-256 (index.js): `669b4936ae44cde2b51af4ae632734a3062c324eb7d25932f0f4aa4c5b39c574`
+The implementation is based on the current DisableCallIdle behavior used by Vencord,
+which patches the client code containing `idleTimeout.start()` and `handleIdleUpdate()`.
 
-## Install
-Host this folder so the URL directly contains `manifest.json` and `index.js`, then paste the folder URL into Kettu's plugin installer.
+## Installation
 
-## Stability note
-The source is deliberately defensive and does not disable unrelated timers. It is nevertheless impossible to certify it as fully stable for Discord 343.12 without executing it against that exact Discord build.
+Host `manifest.json` and `index.js` at a public URL and add that URL in Kettu's plugin
+installer. The folder must expose both files directly.
+
+## Verification
+
+After enabling the plugin, check Kettu/Vendetta logs for either:
+- `patched handleIdleUpdate`
+- `patched ... on call-idle module`
+- `enabled; patched N target(s)`
+
+If it says `No call-idle implementation was found`, the Discord 343.12 bundle is using a
+signature not covered by this build and the plugin should not be considered working.

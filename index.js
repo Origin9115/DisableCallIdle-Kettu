@@ -1,174 +1,149 @@
-vendetta => {
+(function () {
     "use strict";
 
-    const NAME = "DisableCallIdle";
-    const TARGET = "BOT_CALL_IDLE_DISCONNECT";
+    const PATCH_ID = "DisableCallIdle";
+    const metro = window?.vendetta?.metro || window?.bunny?.api?.metro || window?.bunny?.metro;
+    const patcher = window?.vendetta?.patcher || window?.bunny?.api?.patcher || window?.bunny?.patcher;
+    const logger = window?.vendetta?.logger || window?.bunny?.api?.logger;
+
+    const say = (...args) => {
+        try {
+            if (typeof logger?.log === "function") return logger.log(`[${PATCH_ID}]`, ...args);
+            console.log(`[${PATCH_ID}]`, ...args);
+        } catch {}
+    };
+
     const unpatches = [];
-    const patched = new Set();
-
-    const log = (...args) => {
-        try {
-            if (vendetta?.logger?.log) vendetta.logger.log(`[${NAME}]`, ...args);
-        } catch {}
-    };
-
-    const error = (...args) => {
-        try {
-            if (vendetta?.logger?.error) vendetta.logger.error(`[${NAME}]`, ...args);
-            else if (vendetta?.logger?.log) vendetta.logger.log(`[${NAME}]`, ...args);
-        } catch {}
-    };
+    const seenObjects = new Set();
+    const seenMethods = new Set();
+    let hits = 0;
 
     function fnSource(fn) {
         try {
-            return Function.prototype.toString.call(fn);
+            return typeof fn === "function" ? Function.prototype.toString.call(fn) : "";
         } catch {
             return "";
         }
     }
 
-    function isTargetStart(fn) {
-        const source = fnSource(fn);
-        return source.includes(TARGET);
+    function addUnpatch(p) {
+        if (typeof p === "function") unpatches.push(p);
     }
 
-    function patchPrototype(proto, label) {
-        if (!proto || typeof proto.start !== "function") return false;
-        if (!isTargetStart(proto.start)) return false;
-        if (patched.has(proto)) return true;
+    function patchMethod(obj, key, fn) {
+        if (!obj || typeof fn !== "function") return;
+        const marker = `${key}:${fn}`;
+        if (seenMethods.has(marker)) return;
+        seenMethods.add(marker);
 
-        try {
-            const unpatch = vendetta.patcher.after(
-                `${NAME}:${label}`,
-                proto,
-                "start",
-                function (args) {
-                    // spitroast preserves the original `this` context.
-                    // The call-idle timer exposes stop() on its instance.
-                    try {
-                        if (typeof this?.stop === "function") this.stop();
-                    } catch (e) {
-                        error("could not stop call-idle timeout", e);
-                    }
-                }
-            );
+        // Current Discord desktop implementation has two relevant signatures:
+        //   1) this.idleTimeout.start(...) / this.idleTimeout.stop(...)
+        //   2) handleIdleUpdate(){...}
+        // On mobile, minification can change surrounding code, so we identify the
+        // method by its source rather than by a module ID or exported class name.
+        const src = fnSource(fn);
+        if (!src) return;
 
-            if (typeof unpatch === "function") unpatches.push(unpatch);
-            patched.add(proto);
-            log(`patched ${label}`);
-            return true;
-        } catch (e) {
-            error(`failed to patch ${label}`, e);
-            return false;
+        if (/(^|[^\w])handleIdleUpdate\s*\(/.test(src)) {
+            try {
+                addUnpatch(patcher.instead(key, obj, function () { return; }));
+                hits++;
+                say("patched handleIdleUpdate");
+                return;
+            } catch (e) {
+                say("handleIdleUpdate patch failed", e);
+            }
+        }
+
+        if (/idleTimeout\s*\.(?:start|stop)\s*\(/.test(src) || src.includes("BOT_CALL_IDLE_DISCONNECT")) {
+            try {
+                addUnpatch(patcher.instead(key, obj, function () { return; }));
+                hits++;
+                say(`patched ${String(key)} on call-idle module`);
+            } catch (e) {
+                say(`call-idle patch failed for ${String(key)}`, e);
+            }
         }
     }
 
-    function inspectExport(value, label, seen) {
-        if (!value || (typeof value !== "object" && typeof value !== "function")) return;
-        if (seen.has(value)) return;
-        seen.add(value);
+    function inspect(value, depth) {
+        if (!value || depth > 3) return;
+        const type = typeof value;
+        if (type !== "object" && type !== "function") return;
+        if (seenObjects.has(value)) return;
+        seenObjects.add(value);
 
-        // Timeout is commonly exported as a class/function.
-        if (typeof value === "function") {
-            patchPrototype(value.prototype, `${label}.prototype`);
-        }
+        // Inspect own properties. Discord Metro modules are commonly objects with
+        // one or more exported functions/classes.
+        let keys = [];
+        try { keys = Object.getOwnPropertyNames(value); } catch { return; }
 
-        // Some Discord modules expose an object directly.
-        if (typeof value.start === "function" && isTargetStart(value.start)) {
-            if (!patched.has(value)) {
+        for (const key of keys) {
+            if (key === "length" || key === "name" || key === "prototype" || key === "caller" || key === "arguments") continue;
+            let child;
+            try { child = value[key]; } catch { continue; }
+
+            if (typeof child === "function") {
+                patchMethod(value, key, child);
+                // Inspect the prototype of classes/functions too.
                 try {
-                    const unpatch = vendetta.patcher.after(
-                        `${NAME}:${label}`,
-                        value,
-                        "start",
-                        function () {
-                            try {
-                                if (typeof this?.stop === "function") this.stop();
-                            } catch (e) {
-                                error("could not stop call-idle timeout", e);
-                            }
-                        }
-                    );
-                    if (typeof unpatch === "function") unpatches.push(unpatch);
-                    patched.add(value);
-                    log(`patched ${label}`);
-                } catch (e) {
-                    error(`failed to patch ${label}`, e);
+                    const proto = child.prototype;
+                    if (proto && proto !== Object.prototype) inspect(proto, depth + 1);
+                } catch {}
+            } else if (child && (typeof child === "object" || typeof child === "function")) {
+                const src = fnSource(child);
+                if (src && (src.includes("idleTimeout") || src.includes("handleIdleUpdate") || src.includes("BOT_CALL_IDLE_DISCONNECT"))) {
+                    inspect(child, depth + 1);
                 }
             }
         }
-
-        // Handle the common default-export shape and shallow module wrappers.
-        try {
-            if (value.default && value.default !== value) {
-                inspectExport(value.default, `${label}.default`, seen);
-            }
-        } catch {}
     }
 
     function scan() {
-        const metro = vendetta?.metro;
-        if (!metro) {
-            error("Vendetta metro API is unavailable");
+        if (!metro || !patcher) {
+            say("Kettu/Vendetta Metro or patcher API is unavailable");
             return;
         }
 
-        const seen = new Set();
         let modules = [];
-
         try {
             if (typeof metro.findAll === "function") {
                 modules = metro.findAll(() => true) || [];
+            } else if (typeof metro.find === "function") {
+                const one = metro.find(() => true);
+                if (one) modules = [one];
             }
         } catch (e) {
-            error("module scan failed", e);
+            say("Metro scan failed", e);
+            return;
         }
 
-        // Fast path for the historical Timeout module shape.
-        try {
-            if (typeof metro.findByProps === "function") {
-                const candidate = metro.findByProps("start", "stop");
-                if (candidate) inspectExport(candidate, "findByProps(start,stop)", seen);
-            }
-        } catch (e) {
-            error("direct Timeout lookup failed", e);
-        }
+        for (const mod of modules) inspect(mod, 0);
 
-        for (let i = 0; i < modules.length; i++) {
-            try {
-                inspectExport(modules[i], `module[${i}]`, seen);
-
-                // A module can export an object containing the constructor.
-                if (modules[i] && typeof modules[i] === "object") {
-                    for (const key of Object.keys(modules[i])) {
-                        if (key === "__esModule") continue;
-                        const value = modules[i][key];
-                        if (typeof value === "function") {
-                            inspectExport(value, `module[${i}].${key}`, seen);
-                        }
-                    }
-                }
-            } catch {}
-        }
-
-        if (!patched.size) {
-            log(`no ${TARGET} timeout found in the currently loaded modules`);
+        if (!hits) {
+            say("No call-idle implementation was found in loaded Metro modules");
         } else {
-            log(`enabled; ${patched.size} target(s) patched`);
+            say(`enabled; patched ${hits} target(s)`);
         }
     }
 
     return {
         onLoad() {
+            // Discord may lazy-load call UI modules. Scan now and repeat briefly so
+            // the patch catches a module that appears immediately after startup.
             scan();
+            const timers = [500, 1500, 3000, 6000, 10000];
+            for (const ms of timers) {
+                const id = setTimeout(scan, ms);
+                unpatches.push(() => clearTimeout(id));
+            }
         },
 
         onUnload() {
-            for (const unpatch of unpatches.splice(0)) {
-                try { unpatch(); } catch {}
+            for (const fn of unpatches.splice(0)) {
+                try { fn(); } catch {}
             }
-            patched.clear();
-            log("disabled");
+            say("disabled");
         }
     };
-};
+})();
