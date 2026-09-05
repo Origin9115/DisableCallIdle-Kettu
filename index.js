@@ -1,11 +1,10 @@
 import { ReactNative as RN } from "@vendetta/metro/common";
 import { instead } from "@vendetta/patcher";
 
-// ─── Debug toast helper ───────────────────────────────────────────────────────
-function toast(msg) {
-  try {
-    RN.ToastAndroid.show("[BT Fix] " + msg, RN.ToastAndroid.LONG);
-  } catch(e) {}
+// ─── Debug helper — uses Alert dialog (impossible to miss) + console.log ──────
+function debug(msg) {
+  try { console.log("[BT-FIX] " + msg); } catch(e) {}
+  try { RN.Alert.alert("BT Fix Debug", msg); } catch(e) {}
 }
 
 // ─── Audio module ─────────────────────────────────────────────────────────────
@@ -20,32 +19,17 @@ if (RN.TurboModuleRegistry.get("RTNAudioManager")) {
   amName = "NativeAudioManagerModule";
 }
 
-toast("Module: " + amName);
-
-// Show which SCO-related methods exist on the module
 if (AudioManager) {
-  var found = [];
-  var checkMethods = [
-    "setCommunicationModeOn", "setBluetoothScoOn",
-    "startBluetoothSco", "setMode", "setCommunicationDevice"
-  ];
-  for (var i = 0; i < checkMethods.length; i++) {
-    if (typeof AudioManager[checkMethods[i]] === "function") {
-      found.push(checkMethods[i]);
-    }
-  }
-  toast("Methods: " + (found.length > 0 ? found.join(", ") : "NONE FOUND"));
-
-  // Also show ALL method names on the module so we can see what's available
   var allMethods = Object.keys(AudioManager).filter(function(k) {
     return typeof AudioManager[k] === "function";
   });
-  toast("All methods: " + allMethods.join(", "));
+  debug("Module: " + amName + "\nMethods: " + allMethods.join(", "));
 } else {
-  toast("AudioManager is NULL - no module found!");
+  debug("FAILED: AudioManager is null.\nNeither RTNAudioManager nor NativeAudioManagerModule found.");
 }
 
-// ─── Patch attempt ────────────────────────────────────────────────────────────
+// ─── Patches ──────────────────────────────────────────────────────────────────
+var patches = [];
 var patchCount = 0;
 
 function tryPatch(method, fn) {
@@ -55,31 +39,29 @@ function tryPatch(method, fn) {
     patchCount++;
     return p;
   } catch(e) {
-    toast("Patch failed: " + method + " - " + e.message);
+    debug("Patch error on " + method + ": " + e.message);
     return null;
   }
 }
 
-var patches = [];
-
 patches.push(tryPatch("setCommunicationModeOn", function(args, orig) {
-  toast("setCommunicationModeOn called: " + args[0]);
+  try { console.log("[BT-FIX] setCommunicationModeOn: " + args[0]); } catch(e) {}
   if (args[0]) return;
   return orig.apply(this, args);
 }));
 
 patches.push(tryPatch("setBluetoothScoOn", function(args, orig) {
-  toast("setBluetoothScoOn called: " + args[0]);
+  try { console.log("[BT-FIX] setBluetoothScoOn: " + args[0]); } catch(e) {}
   if (args[0] === true) return;
   return orig.apply(this, args);
 }));
 
 patches.push(tryPatch("startBluetoothSco", function() {
-  toast("startBluetoothSco blocked!");
+  try { console.log("[BT-FIX] startBluetoothSco blocked"); } catch(e) {}
 }));
 
 patches.push(tryPatch("setMode", function(args, orig) {
-  toast("setMode called: " + args[0]);
+  try { console.log("[BT-FIX] setMode: " + args[0]); } catch(e) {}
   if (args[0] === 2 || args[0] === 3) return;
   return orig.apply(this, args);
 }));
@@ -87,14 +69,13 @@ patches.push(tryPatch("setMode", function(args, orig) {
 patches.push(tryPatch("setCommunicationDevice", function(args, orig) {
   var dev = args[0] || {};
   var t = dev.type || dev.deviceType || -1;
-  toast("setCommunicationDevice type: " + t);
+  try { console.log("[BT-FIX] setCommunicationDevice type: " + t); } catch(e) {}
   if (t === 8) return;
   return orig.apply(this, args);
 }));
 
-toast("Patches applied: " + patchCount);
+debug("Patches applied: " + patchCount + " / 5");
 
-// ─── Cleanup ──────────────────────────────────────────────────────────────────
 export const onUnload = function() {
   for (var i = 0; i < patches.length; i++) {
     try { patches[i] && patches[i](); } catch(e) {}
