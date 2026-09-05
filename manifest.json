@@ -1,6 +1,6 @@
 {
   "name": "Bluetooth Audio Fix Debug",
-  "description": "Debug build of Bluetooth Audio Fix. Blocks hands-free mode and logs audio-manager routing calls.",
+  "description": "Debug build based on the original working AudioFix plugin. Blocks hands-free mode and logs native audio-manager calls.",
   "authors": [
     {
       "name": "Omar"
