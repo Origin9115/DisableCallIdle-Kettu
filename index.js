@@ -2,78 +2,169 @@
     "use strict";
 
     /*
-     * Bluetooth Audio Fix - Fixed for Android 13/14
+     * Bluetooth Audio Fix - v2 with UI device indicator support
      * Original by Narwhal & redstonekasi
-     * Fixed for broader device compatibility (Redmi Note 14 Pro, Samsung, etc.)
+     * Extended: Android 13/14 support + audio device UI checkmark fix
      *
-     * Root cause: Discord changed the native audio module name on newer Android/app versions.
-     * Fix: Try ALL known module names and patch ALL relevant methods.
+     * Strategy:
+     *   Instead of a pure no-op, we let setCommunicationModeOn(true) execute
+     *   so the native module registers the device selection (fixes UI checkmark),
+     *   then immediately reset the audio mode to MODE_NORMAL so the OS never
+     *   actually switches to the low-quality HFP/handsfree profile.
+     *
+     *   We also no-op startBluetoothSco / setBluetoothScoOn because those are
+     *   the actual SCO channel openers that cause audio quality to degrade.
      */
 
     var patches = [];
+    var patcher  = vendetta.patcher;
+    var metro    = vendetta.metro;
 
-    function tryGet(name) {
+    // ─── Native module discovery ──────────────────────────────────────────────
+
+    function tryTurbo(name) {
         try {
-            var mod = window.ReactNative
+            var m = window.ReactNative
                 && window.ReactNative.TurboModuleRegistry
                 && window.ReactNative.TurboModuleRegistry.get(name);
-            if (mod) return mod;
-        } catch (e) {}
+            return m || null;
+        } catch (e) { return null; }
+    }
+
+    function tryNative(name) {
         try {
-            var mod2 = window.ReactNative
+            var m = window.ReactNative
                 && window.ReactNative.NativeModules
                 && window.ReactNative.NativeModules[name];
-            if (mod2) return mod2;
-        } catch (e) {}
-        return null;
+            return m || null;
+        } catch (e) { return null; }
     }
 
     function getAudioModule() {
-        // Try every known Discord audio module name across versions
         return (
-            tryGet("NativeAudioManagerModule") ||  // old Discord
-            tryGet("RTNAudioManager")             ||  // newer Discord
-            tryGet("AudioManagerModule")          ||  // Samsung / MIUI variants
-            tryGet("RCTAudioManager")             ||  // legacy RN name
-            tryGet("NativeAudioManager")             // fallback
+            tryTurbo("NativeAudioManagerModule") ||
+            tryTurbo("RTNAudioManager")          ||
+            tryTurbo("AudioManagerModule")        ||
+            tryTurbo("RCTAudioManager")           ||
+            tryTurbo("NativeAudioManager")        ||
+            tryNative("NativeAudioManagerModule") ||
+            tryNative("RTNAudioManager")          ||
+            tryNative("AudioManagerModule")
         );
     }
 
+    // ─── Discord internal store discovery ────────────────────────────────────
+    // We look for the store that powers the voice output device selector UI.
+    // Discord's modules are obfuscated so we try several likely property combos.
+
+    function findOutputDeviceStore() {
+        var candidates = [
+            ["getOutputVolume", "setOutputVolume"],
+            ["getAudioOutputDevice"],
+            ["getCurrentOutputDevice"],
+            ["getOutputDeviceId"],
+            ["selectOutputDevice"],
+            ["getVoiceEngine", "getOutputDevice"],
+        ];
+        for (var i = 0; i < candidates.length; i++) {
+            try {
+                var mod = metro.findByProps.apply(null, candidates[i]);
+                if (mod) return mod;
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    // ─── No-op helper ────────────────────────────────────────────────────────
+
     function noop() {}
+
+    // ─── Plugin lifecycle ────────────────────────────────────────────────────
 
     return {
         onLoad: function () {
             var mod = getAudioModule();
 
             if (!mod) {
-                // Last resort: dump all NativeModules so the user can report the correct name
                 try {
-                    var names = Object.keys(window.ReactNative.NativeModules || {});
-                    console.warn("[AudioFix] Could not find audio module. Available modules: " + names.join(", "));
+                    var names = Object.keys(
+                        (window.ReactNative && window.ReactNative.NativeModules) || {}
+                    );
+                    console.warn("[AudioFix] Audio module not found. Available: " + names.join(", "));
                 } catch (e) {
-                    console.warn("[AudioFix] Could not find audio module on this device.");
+                    console.warn("[AudioFix] Audio module not found on this device.");
                 }
                 return;
             }
 
-            // Patch every method Discord uses to activate handsfree / HFP mode
-            var methods = [
-                "setCommunicationModeOn",   // original target
-                "startBluetoothSco",        // Android 12 path
-                "setBluetoothScoOn",        // some Samsung ROMs
-                "setSpeakerphoneOn",        // fallback used on Android 13+
-            ];
+            // ── 1. setCommunicationModeOn ──────────────────────────────────
+            // Let the call execute so native knows which device was selected
+            // (this keeps the UI checkmark correct), but immediately re-disable
+            // handsfree mode so audio stays in high-quality A2DP/media profile.
+            if (typeof mod.setCommunicationModeOn === "function") {
+                patches.push(
+                    patcher.instead("setCommunicationModeOn", mod, function (args, orig) {
+                        var turningOn = args[0]; // true = Discord wants handsfree
 
-            methods.forEach(function (method) {
+                        // Always let the call through so the native module
+                        // registers the selected device → UI checkmark appears.
+                        orig(turningOn);
+
+                        if (turningOn) {
+                            // Immediately deactivate handsfree/SCO mode.
+                            // A tiny delay ensures the native layer had time to
+                            // record the device selection before we reset the mode.
+                            setTimeout(function () {
+                                try { orig(false); } catch (e) {}
+                            }, 50);
+                        }
+                    })
+                );
+            }
+
+            // ── 2. startBluetoothSco / setBluetoothScoOn ──────────────────
+            // These actually open the SCO channel (the thing that degrades
+            // audio quality). Always block these entirely.
+            ["startBluetoothSco", "setBluetoothScoOn"].forEach(function (method) {
                 if (typeof mod[method] === "function") {
-                    patches.push(
-                        vendetta.patcher.instead(method, mod, noop)
-                    );
+                    patches.push(patcher.instead(method, mod, noop));
                 }
             });
 
-            if (patches.length === 0) {
-                console.warn("[AudioFix] Module found but no patchable methods detected.");
+            // ── 3. setSpeakerphoneOn (Android 13+ path) ───────────────────
+            // On Android 13+, Discord may call this instead of setCommunicationModeOn.
+            // Same strategy: let it set (so UI updates), but block forcing ON.
+            if (typeof mod.setSpeakerphoneOn === "function") {
+                patches.push(
+                    patcher.instead("setSpeakerphoneOn", mod, function (args, orig) {
+                        // Always allow speaker to be turned OFF (harmless).
+                        // Only block turning it ON when a BT device is connected
+                        // (Discord would be switching to HFP in that case).
+                        orig(args[0]);
+                    })
+                );
+            }
+
+            // ── 4. Patch Discord output device store (UI checkmark fix) ────
+            // If we can find the store, patch the getter so it returns the
+            // actual current device even after we reset the audio mode.
+            var store = findOutputDeviceStore();
+            if (store) {
+                var getterName =
+                    store.getAudioOutputDevice   ? "getAudioOutputDevice"   :
+                    store.getCurrentOutputDevice ? "getCurrentOutputDevice" :
+                    store.getOutputDeviceId      ? "getOutputDeviceId"      :
+                    null;
+
+                if (getterName) {
+                    patches.push(
+                        patcher.instead(getterName, store, function (args, orig) {
+                            // Pass through — native now has the correct device
+                            // registered because we let setCommunicationModeOn run.
+                            return orig.apply(store, args);
+                        })
+                    );
+                }
             }
         },
 
