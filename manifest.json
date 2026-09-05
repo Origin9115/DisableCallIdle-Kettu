@@ -1,15 +1,10 @@
-{
+﻿{
   "name": "Bluetooth Audio Fix",
-  "description": "Forces Bluetooth to stay in high-quality A2DP mode during Discord calls. Blocks SCO/HFP handsfree profile so your phone mic is always used as input regardless of selected output device.",
+  "description": "Prevents Discord from enabling handsfree mode while in a call. Fixed for Android 13/14.",
   "authors": [
-    {
-      "name": "origin9115",
-      "id": "368787902538186763"
-    }
+    { "name": "Narwhal", "id": "455429792871874581" },
+    { "name": "redstonekasi", "id": "265064055490871297" }
   ],
   "main": "index.js",
-  "vendetta": {
-    "icon": "speaker"
-  },
-  "hash": "d4d99bc8d42ff560d95dfceb27630c7c95b9ee8b1f83de5da38ec143d293c7c1"
+  "vendetta": { "icon": "speaker" }
 }
