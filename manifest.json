@@ -1,10 +1,1 @@
-﻿{
-  "name": "Bluetooth Audio Fix",
-  "description": "Prevents Discord from enabling handsfree mode while in a call. Fixed for Android 13/14.",
-  "authors": [
-    { "name": "Narwhal", "id": "455429792871874581" },
-    { "name": "redstonekasi", "id": "265064055490871297" }
-  ],
-  "main": "index.js",
-  "vendetta": { "icon": "speaker" }
-}
+﻿{"name":"Bluetooth Audio Fix","description":"Prevents Discord from enabling handsfree mode while in a call","authors":[{"name":"Narwhal","id":"455429792871874581"},{"name":"redstonekasi","id":"265064055490871297"}],"main":"index.js","vendetta":{"icon":"speaker"},"hash":"b74892b60b0ac5565509619bccb97866ff1ec6ec4b72035431365c679b9a9a2e"}
