@@ -1,58 +1,72 @@
-import { ReactNative as RN, FluxDispatcher } from "@vendetta/metro/common";
-import { instead, after } from "@vendetta/patcher";
+import { ReactNative as RN } from "@vendetta/metro/common";
+import { instead } from "@vendetta/patcher";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// findByProps — accessed through the global API at runtime.
-// Kettu/Bunny/Revenge all expose this on their global object.
-// We try every known global name so the plugin works regardless of mod version.
+// POLYFILLS
+// We keep strictly the same two imports as the original working plugin.
+// Everything else is resolved at runtime through the global mod API.
 // ─────────────────────────────────────────────────────────────────────────────
-function findByProps(...props) {
-  var api =
-    globalThis.vendetta   ||
-    globalThis.bunny      ||
-    globalThis.revenge    ||
-    globalThis.enmity     ||
-    {};
-  var fn =
-    (api.metro && api.metro.findByProps) ||
-    (api.metro && api.metro.find)        ||
-    null;
-  if (!fn) return null;
-  try { return fn(...props); } catch { return null; }
+
+// 'after' — implemented via 'instead' so we don't need to import it.
+function makeAfter(obj, method, cb) {
+  if (!obj || typeof obj[method] !== "function") return null;
+  return instead(method, obj, function(args, orig) {
+    var result = orig.apply(this, args);
+    try { cb(args, result); } catch(e) {}
+    return result;
+  });
 }
 
-const patches = [];
-let keepAliveTimer = null;
-let inCall = false;
+// 'findByProps' and 'FluxDispatcher' — read from the global mod object.
+// Kettu/Bunny/Revenge/Vendetta all expose their API on a global.
+// typeof-guard is safe: it never throws for undeclared variables.
+var _api =
+  (typeof vendetta !== "undefined" && vendetta) ||
+  (typeof bunny    !== "undefined" && bunny)    ||
+  (typeof revenge  !== "undefined" && revenge)  ||
+  null;
+
+var _metro   = (_api && _api.metro)  || {};
+var _common  = (_metro.common)       || {};
+
+var FluxDispatcher = _common.FluxDispatcher || _common.Dispatcher || null;
+
+function findByProps() {
+  var fn = _metro.findByProps || null;
+  if (!fn) return null;
+  try { return fn.apply(null, arguments); } catch(e) { return null; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────────────────────────────────────
+var patches       = [];
+var keepAliveTimer  = null;
+var callStateUnsubs = [];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NATIVE AUDIO MODULE
-// Discord uses different module names across RN versions — try both.
 // ─────────────────────────────────────────────────────────────────────────────
-const AudioManager =
+var AudioManager =
   RN.TurboModuleRegistry.get("RTNAudioManager") ||
   RN.TurboModuleRegistry.get("NativeAudioManagerModule") ||
   null;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HELPER: safely patch a method only if it exists
+// HELPER — safe patch wrapper (always use catch(e) for Hermes compat)
 // ─────────────────────────────────────────────────────────────────────────────
 function safeInstead(obj, method, fn) {
   if (!obj || typeof obj[method] !== "function") return null;
-  try { return instead(method, obj, fn); } catch (e) { return null; }
-}
-function safeAfter(obj, method, fn) {
-  if (!obj || typeof obj[method] !== "function") return null;
-  try { return after(method, obj, fn); } catch (e) { return null; }
+  try { return instead(method, obj, fn); } catch(e) { return null; }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH 1 — Block setCommunicationModeOn(true)
 //
-// Prevents Discord from putting Android into MODE_IN_COMMUNICATION,
-// which triggers Bluetooth to switch from A2DP (high quality) → SCO/HFP.
-//   true  → blocked  (keeps A2DP alive, phone mic stays as input)
-//   false → allowed  (resets routing when user switches to Phone/Speaker)
+// Stops Discord from switching Android into MODE_IN_COMMUNICATION,
+// which forces Bluetooth from A2DP (high quality) to SCO/HFP (mono).
+//   true  → blocked  (A2DP stays alive, phone mic stays as input)
+//   false → allowed  (clears routing when switching to Phone/Speaker)
 // ─────────────────────────────────────────────────────────────────────────────
 patches.push(
   safeInstead(AudioManager, "setCommunicationModeOn", function(args, orig) {
@@ -62,13 +76,15 @@ patches.push(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PATCH 2 — Block sibling SCO/communication methods (Samsung & MIUI)
+// PATCH 2 — Block sibling SCO methods (Samsung OneUI & MIUI)
 //
-// Samsung OneUI and MIUI trigger SCO through these methods independently.
-//  setBluetoothScoOn(bool)  — directly toggles SCO on the BT link
-//  startBluetoothSco()      — opens an SCO session (legacy, still called by some OEMs)
-//  setMode(int)             — AudioManager mode: block 2=IN_CALL, 3=IN_COMMUNICATION
-//  setCommunicationDevice   — Android 12+ API: block only TYPE_BLUETOOTH_SCO (type 8)
+// These OEMs call extra AudioManager methods independently of
+// setCommunicationModeOn to open an SCO session:
+//
+//  setBluetoothScoOn(bool)  — directly enables the SCO link
+//  startBluetoothSco()      — legacy API, still used by some OEM audio HALs
+//  setMode(int)             — mode 2=IN_CALL, 3=IN_COMMUNICATION → block both
+//  setCommunicationDevice   — Android 12+ API: block if device type = SCO (8)
 // ─────────────────────────────────────────────────────────────────────────────
 if (AudioManager) {
 
@@ -99,15 +115,17 @@ if (AudioManager) {
     })
   );
 
-  // ── Catch-all for any other OEM-specific SCO method names ─────────────────
+  // Catch-all: block any other OEM-specific method whose name suggests SCO.
   var alreadyPatched = [
     "setCommunicationModeOn", "setCommunicationDevice",
     "setBluetoothScoOn", "startBluetoothSco"
   ];
-  Object.keys(AudioManager).forEach(function(k) {
-    if (alreadyPatched.indexOf(k) !== -1) return;
-    if (typeof AudioManager[k] !== "function") return;
-    if (!/sco|startBluetooth|communication.*device/i.test(k)) return;
+  var keys = Object.keys(AudioManager);
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (alreadyPatched.indexOf(k) !== -1) continue;
+    if (typeof AudioManager[k] !== "function") continue;
+    if (!/sco|startBluetooth|communication.*device/i.test(k)) continue;
     patches.push(
       safeInstead(AudioManager, k, function(args, orig) {
         if (args[0] === true) return;
@@ -115,15 +133,15 @@ if (AudioManager) {
         return orig.apply(this, args);
       })
     );
-  });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH 3 — Samsung/MIUI keep-alive
 //
-// Samsung/MIUI audio HAL can silently re-enable SCO seconds after a call
-// starts, bypassing all JS patches. We periodically push back by calling
-// the disable path of every SCO method we patched. Only runs during a call.
+// Samsung/MIUI audio HAL can re-enable SCO seconds after call start,
+// bypassing JS patches. We periodically push back with disable calls.
+// Only runs during an active voice call.
 // ─────────────────────────────────────────────────────────────────────────────
 function startKeepAlive() {
   if (keepAliveTimer) return;
@@ -131,7 +149,7 @@ function startKeepAlive() {
     try { AudioManager && AudioManager.setCommunicationModeOn && AudioManager.setCommunicationModeOn(false); } catch(e) {}
     try { AudioManager && AudioManager.stopBluetoothSco && AudioManager.stopBluetoothSco(); } catch(e) {}
     try { AudioManager && AudioManager.setBluetoothScoOn && AudioManager.setBluetoothScoOn(false); } catch(e) {}
-    try { AudioManager && AudioManager.setMode && AudioManager.setMode(0); } catch(e) {} // MODE_NORMAL
+    try { AudioManager && AudioManager.setMode && AudioManager.setMode(0); } catch(e) {}
   }, 3000);
 }
 
@@ -141,47 +159,40 @@ function stopKeepAlive() {
   keepAliveTimer = null;
 }
 
-// Track voice call state via Flux events to start/stop the keep-alive.
-var callStateUnsubs = [];
-
 function onCallEvent(event) {
   if (!event) return;
   if (event.type === "VOICE_CHANNEL_SELECT") {
-    if (event.channelId == null) { inCall = false; stopKeepAlive(); }
-    else { inCall = true; startKeepAlive(); }
+    if (event.channelId == null) { stopKeepAlive(); }
+    else { startKeepAlive(); }
     return;
   }
   if (event.type === "RTC_CONNECTION_STATE") {
-    if (event.state === "connected" || event.state === "RTC_CONNECTED") {
-      inCall = true; startKeepAlive();
-    } else if (event.state === "disconnected" || event.state === "RTC_DISCONNECTED") {
-      inCall = false; stopKeepAlive();
-    }
+    if (event.state === "connected" || event.state === "RTC_CONNECTED") { startKeepAlive(); }
+    else if (event.state === "disconnected" || event.state === "RTC_DISCONNECTED") { stopKeepAlive(); }
     return;
   }
-  var startEvents = ["VOICE_CONNECTION_OPEN", "VOICE_STATE_UPDATES"];
-  var endEvents   = ["VOICE_CONNECTION_CLOSE"];
-  if (startEvents.indexOf(event.type) !== -1) { inCall = true;  startKeepAlive(); }
-  if (endEvents.indexOf(event.type)   !== -1) { inCall = false; stopKeepAlive();  }
+  if (event.type === "VOICE_CONNECTION_OPEN") { startKeepAlive(); }
+  if (event.type === "VOICE_CONNECTION_CLOSE") { stopKeepAlive(); }
 }
 
-var allCallEvents = [
-  "VOICE_CONNECTION_OPEN", "VOICE_CONNECTION_CLOSE",
-  "RTC_CONNECTION_STATE",  "VOICE_CHANNEL_SELECT",
-  "VOICE_STATE_UPDATES"
-];
-allCallEvents.forEach(function(evt) {
-  try {
-    var unsub = FluxDispatcher.subscribe(evt, onCallEvent);
-    if (unsub) callStateUnsubs.push(unsub);
-  } catch(e) {}
-});
+if (FluxDispatcher) {
+  var callEvents = [
+    "VOICE_CONNECTION_OPEN", "VOICE_CONNECTION_CLOSE",
+    "RTC_CONNECTION_STATE",  "VOICE_CHANNEL_SELECT"
+  ];
+  for (var j = 0; j < callEvents.length; j++) {
+    try {
+      var unsub = FluxDispatcher.subscribe(callEvents[j], onCallEvent);
+      if (unsub) callStateUnsubs.push(unsub);
+    } catch(e) {}
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH 4 — UI selected-device display fix
 //
 // After any device switch, force the MediaEngineStore to emit a change
-// so Discord's picker re-renders with the correct selected checkmark.
+// so Discord's picker re-renders with the correct checkmark.
 // ─────────────────────────────────────────────────────────────────────────────
 var MediaEngineStore =
   findByProps("getOutputVolume", "getAudioDevice") ||
@@ -193,16 +204,17 @@ var MediaEngineStore =
 
 function forceUIRefresh() {
   try { MediaEngineStore && MediaEngineStore.emitChange && MediaEngineStore.emitChange(); } catch(e) {}
-  var types = [
+  if (!FluxDispatcher) return;
+  var uiEvents = [
     "MEDIA_ENGINE_SET_OUTPUT_VOLUME",
     "AUDIO_DEVICE_CHANGED",
     "VOICE_SETTINGS_UPDATE",
     "AUDIO_OUTPUT_DEVICE_CHANGED",
     "MEDIA_ENGINE_AUDIO_DEVICE_CHANGED"
   ];
-  types.forEach(function(type) {
-    try { FluxDispatcher.dispatch({ type: type }); } catch(e) {}
-  });
+  for (var i = 0; i < uiEvents.length; i++) {
+    try { FluxDispatcher.dispatch({ type: uiEvents[i] }); } catch(e) {}
+  }
 }
 
 // Patch JS-side device-selection actions
@@ -215,42 +227,44 @@ var DeviceActions =
   null;
 
 if (DeviceActions) {
-  var deviceMethodNames = ["setAudioDevice", "selectAudioOutputDevice", "selectAudioDevice", "setAudioOutputDevice"];
-  var foundMethod = null;
-  for (var i = 0; i < deviceMethodNames.length; i++) {
-    if (typeof DeviceActions[deviceMethodNames[i]] === "function") {
-      foundMethod = deviceMethodNames[i];
+  var uiMethodNames = ["setAudioDevice", "selectAudioOutputDevice", "selectAudioDevice", "setAudioOutputDevice"];
+  var uiMethod = null;
+  for (var m = 0; m < uiMethodNames.length; m++) {
+    if (typeof DeviceActions[uiMethodNames[m]] === "function") {
+      uiMethod = uiMethodNames[m];
       break;
     }
   }
-  if (foundMethod) {
+  if (uiMethod) {
     patches.push(
-      safeAfter(DeviceActions, foundMethod, function() {
-        setTimeout(forceUIRefresh, 50);
-      })
+      makeAfter(DeviceActions, uiMethod, function() { setTimeout(forceUIRefresh, 50); })
     );
   }
 }
 
-// Patch native-side device routing methods as a fallback
+// Patch native-side device routing methods as fallback
 if (AudioManager) {
-  Object.keys(AudioManager).forEach(function(k) {
-    if (k === "setCommunicationModeOn") return;
-    if (typeof AudioManager[k] !== "function") return;
-    if (!/device|output|route/i.test(k)) return;
+  var audioKeys = Object.keys(AudioManager);
+  for (var n = 0; n < audioKeys.length; n++) {
+    var ak = audioKeys[n];
+    if (ak === "setCommunicationModeOn") continue;
+    if (typeof AudioManager[ak] !== "function") continue;
+    if (!/device|output|route/i.test(ak)) continue;
     patches.push(
-      safeAfter(AudioManager, k, function() {
-        setTimeout(forceUIRefresh, 50);
-      })
+      makeAfter(AudioManager, ak, function() { setTimeout(forceUIRefresh, 50); })
     );
-  });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CLEANUP — remove all patches and timers when the plugin is disabled
+// CLEANUP
 // ─────────────────────────────────────────────────────────────────────────────
 export const onUnload = function() {
-  patches.forEach(function(p) { try { p && p(); } catch(e) {} });
+  for (var i = 0; i < patches.length; i++) {
+    try { patches[i] && patches[i](); } catch(e) {}
+  }
   stopKeepAlive();
-  callStateUnsubs.forEach(function(unsub) { try { unsub && unsub(); } catch(e) {} });
+  for (var j = 0; j < callStateUnsubs.length; j++) {
+    try { callStateUnsubs[j] && callStateUnsubs[j](); } catch(e) {}
+  }
 };
