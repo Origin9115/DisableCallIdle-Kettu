@@ -1,8 +1,14 @@
 {
-  "name": "DisableCallIdle",
-  "description": "Disables Discord Android's 3-minute idle disconnect for 1-to-1 DM voice calls.",
-  "author": "OpenAI",
-  "version": "2.0.0",
-  "license": "MIT",
-  "main": "index.js"
+  "name": "Bluetooth Audio Fix Debug",
+  "description": "Keeps the Bluetooth communication-mode fix and logs Discord audio routing calls for compatibility debugging.",
+  "authors": [
+    {
+      "name": "Omar / OpenAI"
+    }
+  ],
+  "main": "index.js",
+  "vendetta": {
+    "icon": "speaker"
+  },
+  "hash": ""
 }
