@@ -1,126 +1,256 @@
-import { ReactNative as RN } from "@vendetta/metro/common";
-import { findByProps } from "@vendetta/metro";
+import { ReactNative as RN, FluxDispatcher } from "@vendetta/metro/common";
 import { instead, after } from "@vendetta/patcher";
-import { FluxDispatcher } from "@vendetta/metro/common";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// findByProps — accessed through the global API at runtime.
+// Kettu/Bunny/Revenge all expose this on their global object.
+// We try every known global name so the plugin works regardless of mod version.
+// ─────────────────────────────────────────────────────────────────────────────
+function findByProps(...props) {
+  var api =
+    globalThis.vendetta   ||
+    globalThis.bunny      ||
+    globalThis.revenge    ||
+    globalThis.enmity     ||
+    {};
+  var fn =
+    (api.metro && api.metro.findByProps) ||
+    (api.metro && api.metro.find)        ||
+    null;
+  if (!fn) return null;
+  try { return fn(...props); } catch { return null; }
+}
 
 const patches = [];
+let keepAliveTimer = null;
+let inCall = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1.  NATIVE AUDIO MODULE
-//     Resolve the correct TurboModule for the current RN version.
+// NATIVE AUDIO MODULE
+// Discord uses different module names across RN versions — try both.
 // ─────────────────────────────────────────────────────────────────────────────
 const AudioManager =
-  RN.TurboModuleRegistry.get("RTNAudioManager") ??
-  RN.TurboModuleRegistry.get("NativeAudioManagerModule");
+  RN.TurboModuleRegistry.get("RTNAudioManager") ||
+  RN.TurboModuleRegistry.get("NativeAudioManagerModule") ||
+  null;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2.  PATCH 1 — Block SCO / Bluetooth handsfree profile
-//     setCommunicationModeOn(true)  → blocked  (keeps BT in A2DP, phone mic used)
-//     setCommunicationModeOn(false) → allowed   (clears routing when leaving BT)
+// HELPER: safely patch a method only if it exists
 // ─────────────────────────────────────────────────────────────────────────────
-if (AudioManager?.setCommunicationModeOn) {
+function safeInstead(obj, method, fn) {
+  if (!obj || typeof obj[method] !== "function") return null;
+  try { return instead(method, obj, fn); } catch (e) { return null; }
+}
+function safeAfter(obj, method, fn) {
+  if (!obj || typeof obj[method] !== "function") return null;
+  try { return after(method, obj, fn); } catch (e) { return null; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH 1 — Block setCommunicationModeOn(true)
+//
+// Prevents Discord from putting Android into MODE_IN_COMMUNICATION,
+// which triggers Bluetooth to switch from A2DP (high quality) → SCO/HFP.
+//   true  → blocked  (keeps A2DP alive, phone mic stays as input)
+//   false → allowed  (resets routing when user switches to Phone/Speaker)
+// ─────────────────────────────────────────────────────────────────────────────
+patches.push(
+  safeInstead(AudioManager, "setCommunicationModeOn", function(args, orig) {
+    if (args[0]) return;
+    return orig.apply(this, args);
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH 2 — Block sibling SCO/communication methods (Samsung & MIUI)
+//
+// Samsung OneUI and MIUI trigger SCO through these methods independently.
+//  setBluetoothScoOn(bool)  — directly toggles SCO on the BT link
+//  startBluetoothSco()      — opens an SCO session (legacy, still called by some OEMs)
+//  setMode(int)             — AudioManager mode: block 2=IN_CALL, 3=IN_COMMUNICATION
+//  setCommunicationDevice   — Android 12+ API: block only TYPE_BLUETOOTH_SCO (type 8)
+// ─────────────────────────────────────────────────────────────────────────────
+if (AudioManager) {
+
   patches.push(
-    instead("setCommunicationModeOn", AudioManager, (args, orig) => {
-      if (args[0]) return; // block enabling SCO/HFP
-      return orig(...args); // allow disabling so routing resets properly
+    safeInstead(AudioManager, "setBluetoothScoOn", function(args, orig) {
+      if (args[0] === true) return;
+      return orig.apply(this, args);
     })
   );
+
+  patches.push(
+    safeInstead(AudioManager, "startBluetoothSco", function() {})
+  );
+
+  patches.push(
+    safeInstead(AudioManager, "setMode", function(args, orig) {
+      if (args[0] === 2 || args[0] === 3) return;
+      return orig.apply(this, args);
+    })
+  );
+
+  patches.push(
+    safeInstead(AudioManager, "setCommunicationDevice", function(args, orig) {
+      var device = args[0] || {};
+      var deviceType = device.type || device.deviceType || -1;
+      if (deviceType === 8) return; // TYPE_BLUETOOTH_SCO
+      return orig.apply(this, args);
+    })
+  );
+
+  // ── Catch-all for any other OEM-specific SCO method names ─────────────────
+  var alreadyPatched = [
+    "setCommunicationModeOn", "setCommunicationDevice",
+    "setBluetoothScoOn", "startBluetoothSco"
+  ];
+  Object.keys(AudioManager).forEach(function(k) {
+    if (alreadyPatched.indexOf(k) !== -1) return;
+    if (typeof AudioManager[k] !== "function") return;
+    if (!/sco|startBluetooth|communication.*device/i.test(k)) return;
+    patches.push(
+      safeInstead(AudioManager, k, function(args, orig) {
+        if (args[0] === true) return;
+        if (typeof args[0] === "number" && args[0] >= 2) return;
+        return orig.apply(this, args);
+      })
+    );
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3.  PATCH 2 — Force UI to show the correct selected device
+// PATCH 3 — Samsung/MIUI keep-alive
 //
-//     Discord's audio device picker sometimes doesn't re-render after you
-//     tap a device because the JS store doesn't receive a change notification.
-//
-//     Strategy:
-//       a) Find the JS-side media engine store (multiple prop-name fallbacks).
-//       b) After any device-selection call completes, force the store to emit
-//          a change so every subscribed component re-renders.
-//       c) Also intercept the native module's device-selection methods so we
-//          can fire the same emit even when the change comes from the native side.
+// Samsung/MIUI audio HAL can silently re-enable SCO seconds after a call
+// starts, bypassing all JS patches. We periodically push back by calling
+// the disable path of every SCO method we patched. Only runs during a call.
 // ─────────────────────────────────────────────────────────────────────────────
+function startKeepAlive() {
+  if (keepAliveTimer) return;
+  keepAliveTimer = setInterval(function() {
+    try { AudioManager && AudioManager.setCommunicationModeOn && AudioManager.setCommunicationModeOn(false); } catch(e) {}
+    try { AudioManager && AudioManager.stopBluetoothSco && AudioManager.stopBluetoothSco(); } catch(e) {}
+    try { AudioManager && AudioManager.setBluetoothScoOn && AudioManager.setBluetoothScoOn(false); } catch(e) {}
+    try { AudioManager && AudioManager.setMode && AudioManager.setMode(0); } catch(e) {} // MODE_NORMAL
+  }, 3000);
+}
 
-// --- 3a. Find the store ---
-const MediaEngineStore =
-  findByProps("getOutputVolume", "getAudioDevice") ??
-  findByProps("getOutputVolume", "getCommunicationAudioDevice") ??
-  findByProps("getMediaEngine", "isDeaf") ??
-  findByProps("getCurrentSpeakerDevice") ??
-  findByProps("getAudioDevice");
+function stopKeepAlive() {
+  if (!keepAliveTimer) return;
+  clearInterval(keepAliveTimer);
+  keepAliveTimer = null;
+}
 
-// Helper: trigger a store change notification so the UI re-renders.
-function forceUIRefresh() {
-  try {
-    // Primary: ask the store to emit directly.
-    MediaEngineStore?.emitChange?.();
+// Track voice call state via Flux events to start/stop the keep-alive.
+var callStateUnsubs = [];
 
-    // Secondary: dispatch a Flux event that the audio device picker listens to.
-    // We try several known action types (Discord renames these over versions).
-    const types = [
-      "MEDIA_ENGINE_SET_OUTPUT_VOLUME",
-      "AUDIO_DEVICE_CHANGED",
-      "VOICE_SETTINGS_UPDATE",
-      "AUDIO_OUTPUT_DEVICE_CHANGED",
-    ];
-    for (const type of types) {
-      try { FluxDispatcher.dispatch({ type }); } catch {}
+function onCallEvent(event) {
+  if (!event) return;
+  if (event.type === "VOICE_CHANNEL_SELECT") {
+    if (event.channelId == null) { inCall = false; stopKeepAlive(); }
+    else { inCall = true; startKeepAlive(); }
+    return;
+  }
+  if (event.type === "RTC_CONNECTION_STATE") {
+    if (event.state === "connected" || event.state === "RTC_CONNECTED") {
+      inCall = true; startKeepAlive();
+    } else if (event.state === "disconnected" || event.state === "RTC_DISCONNECTED") {
+      inCall = false; stopKeepAlive();
     }
-  } catch {}
+    return;
+  }
+  var startEvents = ["VOICE_CONNECTION_OPEN", "VOICE_STATE_UPDATES"];
+  var endEvents   = ["VOICE_CONNECTION_CLOSE"];
+  if (startEvents.indexOf(event.type) !== -1) { inCall = true;  startKeepAlive(); }
+  if (endEvents.indexOf(event.type)   !== -1) { inCall = false; stopKeepAlive();  }
 }
 
-// --- 3b. Patch JS-side device-selection actions ---
-// Discord's JS layer has an actions/utilities module that sets the active
-// audio device. We try several known property-name combinations.
-const DeviceActions =
-  findByProps("setAudioDevice", "getAudioInputDevices") ??
-  findByProps("selectAudioOutputDevice", "selectAudioInputDevice") ??
-  findByProps("setAudioDevice") ??
-  findByProps("selectAudioDevice") ??
-  findByProps("setAudioOutputDevice");
+var allCallEvents = [
+  "VOICE_CONNECTION_OPEN", "VOICE_CONNECTION_CLOSE",
+  "RTC_CONNECTION_STATE",  "VOICE_CHANNEL_SELECT",
+  "VOICE_STATE_UPDATES"
+];
+allCallEvents.forEach(function(evt) {
+  try {
+    var unsub = FluxDispatcher.subscribe(evt, onCallEvent);
+    if (unsub) callStateUnsubs.push(unsub);
+  } catch(e) {}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH 4 — UI selected-device display fix
+//
+// After any device switch, force the MediaEngineStore to emit a change
+// so Discord's picker re-renders with the correct selected checkmark.
+// ─────────────────────────────────────────────────────────────────────────────
+var MediaEngineStore =
+  findByProps("getOutputVolume", "getAudioDevice") ||
+  findByProps("getOutputVolume", "getCommunicationAudioDevice") ||
+  findByProps("getMediaEngine", "isDeaf") ||
+  findByProps("getCurrentSpeakerDevice") ||
+  findByProps("getAudioDevice") ||
+  null;
+
+function forceUIRefresh() {
+  try { MediaEngineStore && MediaEngineStore.emitChange && MediaEngineStore.emitChange(); } catch(e) {}
+  var types = [
+    "MEDIA_ENGINE_SET_OUTPUT_VOLUME",
+    "AUDIO_DEVICE_CHANGED",
+    "VOICE_SETTINGS_UPDATE",
+    "AUDIO_OUTPUT_DEVICE_CHANGED",
+    "MEDIA_ENGINE_AUDIO_DEVICE_CHANGED"
+  ];
+  types.forEach(function(type) {
+    try { FluxDispatcher.dispatch({ type: type }); } catch(e) {}
+  });
+}
+
+// Patch JS-side device-selection actions
+var DeviceActions =
+  findByProps("setAudioDevice", "getAudioInputDevices") ||
+  findByProps("selectAudioOutputDevice", "selectAudioInputDevice") ||
+  findByProps("setAudioDevice") ||
+  findByProps("selectAudioDevice") ||
+  findByProps("setAudioOutputDevice") ||
+  null;
 
 if (DeviceActions) {
-  // Determine which method name is present.
-  const methodName = [
-    "setAudioDevice",
-    "selectAudioOutputDevice",
-    "selectAudioDevice",
-    "setAudioOutputDevice",
-  ].find((m) => typeof DeviceActions[m] === "function");
-
-  if (methodName) {
+  var deviceMethodNames = ["setAudioDevice", "selectAudioOutputDevice", "selectAudioDevice", "setAudioOutputDevice"];
+  var foundMethod = null;
+  for (var i = 0; i < deviceMethodNames.length; i++) {
+    if (typeof DeviceActions[deviceMethodNames[i]] === "function") {
+      foundMethod = deviceMethodNames[i];
+      break;
+    }
+  }
+  if (foundMethod) {
     patches.push(
-      after(methodName, DeviceActions, () => {
-        // Give Discord a tick to update its internal state, then refresh the UI.
+      safeAfter(DeviceActions, foundMethod, function() {
         setTimeout(forceUIRefresh, 50);
       })
     );
   }
 }
 
-// --- 3c. Patch native-side device selection as a safety net ---
-// Even if the JS method isn't found, the native module may be called directly.
-// Intercept every method on the AudioManager whose name suggests device switching
-// and fire the same UI refresh after them.
+// Patch native-side device routing methods as a fallback
 if (AudioManager) {
-  const deviceSelectMethods = Object.keys(AudioManager).filter((k) =>
-    /device|output|route/i.test(k) &&
-    k !== "setCommunicationModeOn" &&
-    typeof AudioManager[k] === "function"
-  );
-
-  for (const method of deviceSelectMethods) {
-    try {
-      patches.push(
-        after(method, AudioManager, () => {
-          setTimeout(forceUIRefresh, 50);
-        })
-      );
-    } catch {}
-  }
+  Object.keys(AudioManager).forEach(function(k) {
+    if (k === "setCommunicationModeOn") return;
+    if (typeof AudioManager[k] !== "function") return;
+    if (!/device|output|route/i.test(k)) return;
+    patches.push(
+      safeAfter(AudioManager, k, function() {
+        setTimeout(forceUIRefresh, 50);
+      })
+    );
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4.  CLEANUP — remove all patches when the plugin is disabled
+// CLEANUP — remove all patches and timers when the plugin is disabled
 // ─────────────────────────────────────────────────────────────────────────────
-export const onUnload = () => patches.forEach((p) => p?.());
+export const onUnload = function() {
+  patches.forEach(function(p) { try { p && p(); } catch(e) {} });
+  stopKeepAlive();
+  callStateUnsubs.forEach(function(unsub) { try { unsub && unsub(); } catch(e) {} });
+};
