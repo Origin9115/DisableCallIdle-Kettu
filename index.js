@@ -1,19 +1,30 @@
-import { ReactNative as RN } from "@vendetta/metro/common";
-import { instead } from "@vendetta/patcher";
+// No imports, no exports — pure globals only
+const _patcher = (typeof vendetta !== "undefined" && vendetta?.patcher)
+  || (typeof bunny    !== "undefined" && bunny?.patcher)
+  || (typeof revenge  !== "undefined" && revenge?.patcher)
+  || null;
 
-// Resolve whichever audio native module Discord is using on this device
-const m = RN.TurboModuleRegistry.get("RTNAudioManager") || RN.TurboModuleRegistry.get("NativeAudioManagerModule");
+const _instead = _patcher?.instead || null;
 
-// Shared interceptor: block enable calls, pass disable calls through
-const blockEnable = (args, orig) => args[0] ? void 0 : orig(...args);
+// RNReactNative is a global Discord injects into the JS runtime
+const _rn = (typeof RNReactNative !== "undefined" && RNReactNative)
+  || (typeof __turboModuleProxy !== "undefined" && { TurboModuleRegistry: { get: (n) => __turboModuleProxy(n) } })
+  || null;
 
-// Apply all patches — skip any method that doesn't exist on this device
-const unpatches = !m ? [] : [
-  instead("setCommunicationModeOn", m, blockEnable),
-  m.setBluetoothScoOn  ? instead("setBluetoothScoOn",  m, blockEnable)              : null,
-  m.startBluetoothSco  ? instead("startBluetoothSco",  m, () => {})                 : null,
-  m.stopBluetoothSco   ? null                                                        : null,
-  m.setMode            ? instead("setMode", m, (a, o) => a[0] > 1 ? void 0 : o(...a)) : null,
-];
+const _am = _rn
+  ? (_rn.TurboModuleRegistry.get("RTNAudioManager") || _rn.TurboModuleRegistry.get("NativeAudioManagerModule"))
+  : null;
 
-export const onUnload = () => unpatches.forEach(u => u?.());
+const _u = [];
+const _blk = (a, o) => a[0] ? void 0 : o(...a);
+
+if (_am && _instead) {
+  _u.push(_instead("setCommunicationModeOn", _am, _blk));
+  if (_am.setBluetoothScoOn)  _u.push(_instead("setBluetoothScoOn",  _am, _blk));
+  if (_am.startBluetoothSco)  _u.push(_instead("startBluetoothSco",  _am, () => {}));
+  if (_am.setMode)            _u.push(_instead("setMode", _am, (a, o) => a[0] > 1 ? void 0 : o(...a)));
+}
+
+module.exports = {
+  onUnload: () => _u.forEach(f => f && f())
+};
