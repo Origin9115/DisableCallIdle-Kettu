@@ -1,4 +1,4 @@
-import { ReactNative as RN } from "@vendetta/metro/common";
+import { ReactNative } from "@vendetta/metro/common";
 import { instead } from "@vendetta/patcher";
 
 const TAG = "[AudioFix Debug]";
@@ -6,33 +6,48 @@ const patches = [];
 
 function getAudioManager() {
     try {
-        const turbo = RN?.TurboModuleRegistry;
-        if (!turbo?.get) return null;
+        const turbo = ReactNative.TurboModuleRegistry;
+        if (!turbo || !turbo.get) return null;
 
         const native = turbo.get("NativeAudioManagerModule");
         if (native) return native;
 
         return turbo.get("RTNAudioManager");
     } catch (e) {
-        console.log(TAG, "Failed to get audio manager", e);
+        console.log(TAG, "getAudioManager failed", String(e));
         return null;
     }
 }
 
-function summarize(value, depth = 0) {
+function safeValue(value, depth) {
     if (depth > 2) return "[Object]";
-    if (value == null) return value;
+    if (value === null || value === undefined) return value;
 
     const type = typeof value;
     if (type === "string" || type === "number" || type === "boolean") return value;
     if (type === "function") return "[Function]";
 
-    if (Array.isArray(value)) return value.map(v => summarize(v, depth + 1));
+    if (Array.isArray(value)) {
+        return value.slice(0, 20).map(function (item) {
+            return safeValue(item, depth + 1);
+        });
+    }
 
     if (type === "object") {
         const out = {};
-        for (const key of Object.keys(value).slice(0, 30)) {
-            try { out[key] = summarize(value[key], depth + 1); } catch { out[key] = "[Unreadable]"; }
+        let keys = [];
+        try {
+            keys = Object.keys(value).slice(0, 30);
+        } catch (_) {
+            return "[Object]";
+        }
+
+        for (const key of keys) {
+            try {
+                out[key] = safeValue(value[key], depth + 1);
+            } catch (_) {
+                out[key] = "[Unreadable]";
+            }
         }
         return out;
     }
@@ -42,67 +57,82 @@ function summarize(value, depth = 0) {
 
 const audio = getAudioManager();
 
+console.log(TAG, "plugin loaded");
+
 if (!audio) {
-    console.log(TAG, "No Discord audio manager module found");
+    console.log(TAG, "Audio manager not found");
 } else {
-    const names = [
-        ...new Set([
-            ...Object.keys(audio),
-            ...Object.getOwnPropertyNames(audio),
-            ...Object.getOwnPropertyNames(Object.getPrototypeOf(audio) || {}),
-        ]),
-    ];
+    let names = [];
 
-    console.log(TAG, "Audio manager:", audio);
-    console.log(TAG, "Methods/properties:", names);
-
-    // Preserve the original fix: Discord cannot enable communication/hands-free mode.
     try {
-        const unpatch = instead(
-            "setCommunicationModeOn",
-            audio,
-            () => {
-                console.log(TAG, "BLOCKED setCommunicationModeOn()");
-                return undefined;
-            },
-        );
-        patches.push(unpatch);
+        names = Object.getOwnPropertyNames(audio);
+        const proto = Object.getPrototypeOf(audio);
+        if (proto) names = names.concat(Object.getOwnPropertyNames(proto));
+        names = Array.from(new Set(names));
     } catch (e) {
-        console.log(TAG, "Could not patch setCommunicationModeOn", e);
+        console.log(TAG, "Could not enumerate audio manager", String(e));
     }
 
-    // Observe every audio-manager call so we can identify exactly what Discord calls
-    // when the user taps Bluetooth / Phone / Speaker.
+    console.log(TAG, "Audio manager methods:", names);
+
+    // Preserve the ORIGINAL audiofix behavior exactly:
+    // Discord's request to enter hands-free/communication mode is blocked.
+    try {
+        patches.push(instead(
+            "setCommunicationModeOn",
+            audio,
+            function () {
+                console.log(TAG, "BLOCKED setCommunicationModeOn", Array.from(arguments));
+                return undefined;
+            }
+        ));
+        console.log(TAG, "setCommunicationModeOn hook installed");
+    } catch (e) {
+        console.log(TAG, "FAILED to hook setCommunicationModeOn", String(e));
+    }
+
+    // Log calls made to the audio manager. We DO NOT alter these calls yet.
     for (const name of names) {
         if (name === "setCommunicationModeOn") continue;
 
-        let original;
-        try { original = audio[name]; } catch { continue; }
-        if (typeof original !== "function") continue;
+        let fn = null;
+        try {
+            fn = audio[name];
+        } catch (_) {
+            continue;
+        }
+
+        if (typeof fn !== "function") continue;
 
         try {
-            const descriptor = Object.getOwnPropertyDescriptor(audio, name);
-            if (descriptor && descriptor.writable === false && descriptor.set == null) continue;
-
-            audio[name] = function (...args) {
-                console.log(TAG, "CALL", name, summarize(args));
-                return original.apply(this, args);
+            const original = fn;
+            audio[name] = function () {
+                const args = Array.from(arguments).map(function (v) {
+                    return safeValue(v, 0);
+                });
+                console.log(TAG, "CALL", name, args);
+                return original.apply(this, arguments);
             };
 
-            patches.push(() => {
-                try { audio[name] = original; } catch { /* ignore */ }
+            patches.push(function () {
+                try {
+                    audio[name] = original;
+                } catch (_) {}
             });
-        } catch {
-            // Some TurboModule properties cannot be replaced. That's fine.
+        } catch (_) {
+            // Some TurboModule methods are not writable; ignore them.
         }
     }
 
-    console.log(TAG, "Debug hooks installed. Tap Bluetooth, Phone, and Speaker in a call.");
+    console.log(TAG, "call tracing installed");
+    console.log(TAG, "Now test: Bluetooth -> Phone -> Speaker -> Bluetooth");
 }
 
-export const onUnload = () => {
+export const onUnload = function () {
     for (let i = patches.length - 1; i >= 0; i--) {
-        try { patches[i](); } catch { /* ignore */ }
+        try {
+            patches[i]();
+        } catch (_) {}
     }
-    console.log(TAG, "Unloaded");
+    console.log(TAG, "unloaded");
 };

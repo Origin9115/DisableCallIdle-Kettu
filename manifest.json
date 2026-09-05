@@ -1,9 +1,9 @@
 {
   "name": "Bluetooth Audio Fix Debug",
-  "description": "Keeps the Bluetooth communication-mode fix and logs Discord audio routing calls for compatibility debugging.",
+  "description": "Debug build of Bluetooth Audio Fix. Blocks hands-free mode and logs audio-manager routing calls.",
   "authors": [
     {
-      "name": "Omar / OpenAI"
+      "name": "Omar"
     }
   ],
   "main": "index.js",
