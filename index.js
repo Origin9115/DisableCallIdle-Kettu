@@ -1,42 +1,19 @@
 import { ReactNative as RN } from "@vendetta/metro/common";
 import { instead } from "@vendetta/patcher";
 
-var am = RN.TurboModuleRegistry.get("RTNAudioManager") || RN.TurboModuleRegistry.get("NativeAudioManagerModule");
-var unpatches = [];
+// Resolve whichever audio native module Discord is using on this device
+const m = RN.TurboModuleRegistry.get("RTNAudioManager") || RN.TurboModuleRegistry.get("NativeAudioManagerModule");
 
-function patch(method, fn) {
-  if (!am || typeof am[method] !== "function") return;
-  try { unpatches.push(instead(method, am, fn)); } catch(e) {}
-}
+// Shared interceptor: block enable calls, pass disable calls through
+const blockEnable = (args, orig) => args[0] ? void 0 : orig(...args);
 
-// Block enabling SCO/HFP — keeps Bluetooth in A2DP (high quality)
-// and forces phone mic as input on all output modes.
-// Allow disabling so audio routing resets when switching devices.
-patch("setCommunicationModeOn", function(args, orig) {
-  if (args[0]) return;
-  return orig.apply(this, args);
-});
+// Apply all patches — skip any method that doesn't exist on this device
+const unpatches = !m ? [] : [
+  instead("setCommunicationModeOn", m, blockEnable),
+  m.setBluetoothScoOn  ? instead("setBluetoothScoOn",  m, blockEnable)              : null,
+  m.startBluetoothSco  ? instead("startBluetoothSco",  m, () => {})                 : null,
+  m.stopBluetoothSco   ? null                                                        : null,
+  m.setMode            ? instead("setMode", m, (a, o) => a[0] > 1 ? void 0 : o(...a)) : null,
+];
 
-// Extra methods MIUI/HyperOS/Samsung use to enable SCO independently
-patch("setBluetoothScoOn", function(args, orig) {
-  if (args[0]) return;
-  return orig.apply(this, args);
-});
-
-patch("startBluetoothSco", function() {});
-
-patch("setMode", function(args, orig) {
-  if (args[0] === 2 || args[0] === 3) return;
-  return orig.apply(this, args);
-});
-
-patch("setCommunicationDevice", function(args, orig) {
-  if (((args[0] || {}).type || -1) === 8) return;
-  return orig.apply(this, args);
-});
-
-export const onUnload = function() {
-  for (var i = 0; i < unpatches.length; i++) {
-    try { unpatches[i](); } catch(e) {}
-  }
-};
+export const onUnload = () => unpatches.forEach(u => u?.());
