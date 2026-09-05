@@ -1,54 +1,53 @@
-// No imports — everything through globals Kettu injects into the JS runtime
+// Self-contained — no imports, no external patcher needed.
+// We implement method patching directly so there are zero dependencies.
 
-// ── Step 1: Get the 'instead' patcher function ───────────────────────────────
-// Kettu/Bunny/Vendetta/Revenge all inject a global API object.
-// We try every known name so this works regardless of mod version.
-var _api = null;
-if (typeof vendetta !== "undefined") { _api = vendetta; }
-else if (typeof bunny   !== "undefined") { _api = bunny; }
-else if (typeof revenge !== "undefined") { _api = revenge; }
-else if (typeof kettu   !== "undefined") { _api = kettu; }
-
-var _instead = (_api && _api.patcher && _api.patcher.instead) || null;
-
-// ── Step 2: Get Discord's native audio module ─────────────────────────────────
-// RNReactNative is a global Discord injects — used in the original plugin too.
-var _rn = (typeof RNReactNative !== "undefined") ? RNReactNative : null;
-var _am = null;
-if (_rn && _rn.TurboModuleRegistry) {
-  _am = _rn.TurboModuleRegistry.get("RTNAudioManager")
-     || _rn.TurboModuleRegistry.get("NativeAudioManagerModule")
-     || null;
+// ── Own 'instead' implementation ─────────────────────────────────────────────
+// Replaces obj[method] with fn, passes (args, originalFn) to fn.
+// Returns a cleanup function that restores the original method.
+function patch(obj, method, fn) {
+  if (!obj || typeof obj[method] !== "function") return function() {};
+  var original = obj[method];
+  obj[method] = function() {
+    var args = Array.prototype.slice.call(arguments);
+    return fn(args, original.bind(obj));
+  };
+  return function() { obj[method] = original; };
 }
 
-// ── Step 3: Apply patches ─────────────────────────────────────────────────────
-var _unpatches = [];
-
-function _patch(method, fn) {
-  if (!_am || !_instead || typeof _am[method] !== "function") return;
-  try { _unpatches.push(_instead(method, _am, fn)); } catch(e) {}
+// ── Get Discord's native audio module ────────────────────────────────────────
+// RNReactNative is injected by Discord into the JS runtime as a global.
+var am = null;
+if (typeof RNReactNative !== "undefined" && RNReactNative.TurboModuleRegistry) {
+  am = RNReactNative.TurboModuleRegistry.get("RTNAudioManager")
+    || RNReactNative.TurboModuleRegistry.get("NativeAudioManagerModule")
+    || null;
 }
 
-// Block enable (true), allow disable (false) — this keeps A2DP alive
-// and forces phone mic as input on all output modes
-function _blockEnable(args, orig) {
+// ── Patches ───────────────────────────────────────────────────────────────────
+var unpatches = [];
+
+// Block enable (true) → keeps Bluetooth in A2DP and phone mic as input
+// Allow disable (false) → lets routing reset when switching output device
+function blockEnable(args, orig) {
   if (args[0]) return;
   return orig.apply(this, args);
 }
 
-_patch("setCommunicationModeOn", _blockEnable); // core fix
-_patch("setBluetoothScoOn",      _blockEnable); // MIUI/HyperOS extra trigger
-_patch("startBluetoothSco",      function() {}); // legacy API, always block
-_patch("setMode", function(args, orig) {         // block IN_CALL(2)/IN_COMMUNICATION(3)
-  if (args[0] === 2 || args[0] === 3) return;
-  return orig.apply(this, args);
-});
-
-// ── Step 4: Export cleanup for when plugin is disabled ────────────────────────
-function _cleanup() {
-  for (var i = 0; i < _unpatches.length; i++) {
-    try { _unpatches[i] && _unpatches[i](); } catch(e) {}
-  }
+if (am) {
+  unpatches.push(patch(am, "setCommunicationModeOn", blockEnable));
+  unpatches.push(patch(am, "setBluetoothScoOn",      blockEnable));
+  unpatches.push(patch(am, "startBluetoothSco",      function() {}));
+  unpatches.push(patch(am, "setMode", function(args, orig) {
+    if (args[0] === 2 || args[0] === 3) return; // block IN_CALL and IN_COMMUNICATION
+    return orig.apply(this, args);
+  }));
 }
 
-module.exports = { onUnload: _cleanup };
+// ── Cleanup when plugin is disabled ──────────────────────────────────────────
+module.exports = {
+  onUnload: function() {
+    for (var i = 0; i < unpatches.length; i++) {
+      try { unpatches[i](); } catch(e) {}
+    }
+  }
+};
